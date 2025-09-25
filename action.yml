@@ -1,0 +1,120 @@
+name: KoalaOps / login-azure-aks
+description: Login to Azure via SP (secret or OIDC) or Managed Identity, with optional AKS kubecontext and ACR login.
+author: KoalaOps
+branding:
+  icon: cloud
+  color: purple
+
+inputs:
+  subscription_id:
+    description: Azure subscription ID
+    required: true
+  resource_group:
+    description: Azure resource group containing the AKS cluster
+    required: false
+  cluster_name:
+    description: AKS cluster name (to configure kubecontext)
+    required: false
+
+  # Service Principal (secret or OIDC)
+  client_id:
+    description: Azure Service Principal client ID (set with tenant_id; omit client_secret for OIDC)
+    required: false
+  client_secret:
+    description: Azure Service Principal client secret (set to use SP secret auth)
+    required: false
+  tenant_id:
+    description: Azure tenant ID (required for SP auth/ OIDC)
+    required: false
+
+  # ACR
+  enable_acr_login:
+    description: Whether to login to ACR (true/false)
+    required: false
+    default: "false"
+  acr_registry:
+    description: ACR registry name (e.g., 'myacrname'), required if enable_acr_login=true
+    required: false
+
+outputs:
+  subscription_id:
+    description: Resolved subscription ID
+    value: ${{ steps.out-sub.outputs.subscription_id }}
+  kubectl_context:
+    description: Current kubectl context (if configured)
+    value: ${{ steps.out-kube.outputs.context }}
+  registry_url:
+    description: ACR registry URL if login was requested
+    value: ${{ steps.out-reg.outputs.url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate inputs
+      shell: bash
+      run: |
+        set -Eeuo pipefail
+        if [[ "${{ inputs.cluster_name }}" != "" && "${{ inputs.resource_group }}" == "" ]]; then
+          echo "::error::'resource_group' is required when 'cluster_name' is provided."
+          exit 1
+        fi
+        if [[ "${{ inputs.enable_acr_login }}" == "true" && "${{ inputs.acr_registry }}" == "" ]]; then
+          echo "::error::'acr_registry' is required when 'enable_acr_login' is true."
+          exit 1
+        fi
+
+    - name: Azure login (Service Principal secret or OIDC) or Managed Identity
+      uses: azure/login@v2
+      with:
+        subscription-id: ${{ inputs.subscription_id }}
+        client-id: ${{ inputs.client_id }}
+        client-secret: ${{ inputs.client_secret }}
+        tenant-id: ${{ inputs.tenant_id }}
+
+    - name: Set AKS kubecontext
+      if: inputs.cluster_name != ''
+      uses: azure/aks-set-context@v4
+      with:
+        subscription-id: ${{ inputs.subscription_id }}
+        resource-group: ${{ inputs.resource_group }}
+        cluster-name: ${{ inputs.cluster_name }}
+
+    - name: ACR login
+      if: inputs.enable_acr_login == 'true'
+      shell: bash
+      run: |
+        set -Eeuo pipefail
+        az acr login --name "${{ inputs.acr_registry }}" || {
+          echo "::warning::ACR login failed. Check registry name or permissions."
+        }
+
+    # Outputs
+    - name: Output subscription
+      id: out-sub
+      shell: bash
+      run: |
+        set -Eeuo pipefail
+        echo "subscription_id=${{ inputs.subscription_id }}" >> "$GITHUB_OUTPUT"
+
+    - name: Output kube context
+      id: out-kube
+      shell: bash
+      run: |
+        set -Eeuo pipefail
+        if [[ -n "${{ inputs.cluster_name }}" ]]; then
+          CTX="$(kubectl config current-context 2>/dev/null || true)"
+          echo "context=${CTX}" >> "$GITHUB_OUTPUT"
+        else
+          echo "context=" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Output registry URL
+      id: out-reg
+      shell: bash
+      run: |
+        set -Eeuo pipefail
+        if [[ "${{ inputs.enable_acr_login }}" == "true" && -n "${{ inputs.acr_registry }}" ]]; then
+          echo "url=${{ inputs.acr_registry }}.azurecr.io" >> "$GITHUB_OUTPUT"
+        else
+          echo "url=" >> "$GITHUB_OUTPUT"
+        fi
